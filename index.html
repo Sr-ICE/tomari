@@ -4,23 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
-<meta name="theme-color" content="#0d1014">
+<meta name="theme-color" content="#1c1e3d">
 <title>今夜の泊まり先</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <header class="head">
-    <svg class="moon" viewBox="0 0 52 52" aria-hidden="true">
-      <path class="body" d="M33 6a21 21 0 1 0 13 33A18 18 0 0 1 33 6z"/>
-      <path class="face" d="M17 27q2.5 2.5 5 0M27 30q2.5 2.5 5 0M22 35q2 1.6 4 0"/>
-      <circle class="cheek" cx="15.5" cy="32" r="2.2"/>
-      <circle class="cheek" cx="33" cy="35" r="2.2"/>
-    </svg>
-    <div>
-      <h1>今夜どこでねる？</h1>
-      <p class="lead">明日の朝から逆算して<br>崩れにくい順に並べます</p>
-    </div>
+    <h1>今夜どこでねる？</h1>
   </header>
 
   <!-- 共有リンクで開いたときだけ出る -->
@@ -29,51 +20,86 @@
   <!-- 前の晩に決めた分の、朝の結果を記録する -->
   <section id="record" class="record" hidden></section>
 
-  <section class="morning">
-    <h2>明日の朝</h2>
-    <div class="morning-box">
-    <div class="fields">
-      <label class="field">
-        <span>準備を終えたい時刻</span>
-        <input type="time" id="m-ready">
-      </label>
-      <label class="field">
-        <span>準備にかかる時間</span>
-        <span class="unit"><input type="number" id="m-prep" min="0" step="5" inputmode="numeric">分</span>
-      </label>
-      <label class="field">
-        <span>起きてから出るまで</span>
-        <span class="unit"><input type="number" id="m-getup" min="0" step="5" inputmode="numeric">分</span>
-      </label>
-      <label class="field">
-        <span>理想の起床</span>
-        <input type="time" id="m-ideal">
-      </label>
-    </div>
-    <div class="choice">
-      <span class="choice-label">今日の体調</span>
-      <div class="seg" id="m-body"></div>
-    </div>
-    <div class="choice">
-      <span class="choice-label">いちばん守りたいもの</span>
-      <div class="seg" id="m-priority"></div>
-    </div>
-    </div>
-  </section>
-
-  <section class="result">
-    <h2>おすすめ順</h2>
-    <ol id="ranking" class="ranking"></ol>
-    <p class="note">最速の準備完了は、理想の起床どおりに起きたときの時刻です。並び順は「最速の準備完了の遅さ」「崩れたときの遅れ × 崩れる見込み」「体調の不安」を足した小さい順です。崩れる見込みは、記録が増えるほど実績に寄っていきます。</p>
-  </section>
+  <!-- 1問ずつ聞いて、最後に当てる -->
+  <section id="quiz" class="quiz" aria-live="polite"></section>
 
   <section id="decided" class="decided" hidden></section>
 
-  <section class="edit">
-    <h2>候補</h2>
-    <div id="cands"></div>
-    <button type="button" class="ghost" id="add">候補を足す</button>
+  <!-- 答えが出るまでは隠す（先に見えると当てものにならない） -->
+  <section class="result" id="all" hidden>
+    <h2>ぜんぶの候補</h2>
+    <ol id="ranking" class="ranking"></ol>
+    <p class="note">並び順は「最速の準備完了の遅さ」「崩れたときの遅れ × 崩れる見込み」「体調の不安」「今夜の移動」「相手の移動」を分に直して足した小さい順です。最速の準備完了は、理想の起床どおりに起きたときの時刻です。崩れる見込みは、朝の記録が増えるほど実績に寄っていきます。</p>
   </section>
+
+  <details class="more">
+    <summary>くわしい設定（朝・駅・候補）</summary>
+
+    <section class="morning">
+      <h2>明日の朝</h2>
+      <div class="morning-box">
+        <div class="fields">
+          <label class="field">
+            <span>準備を終えたい時刻</span>
+            <input type="time" id="m-ready">
+          </label>
+          <label class="field">
+            <span>準備にかかる時間</span>
+            <span class="unit"><input type="number" id="m-prep" min="0" step="5" inputmode="numeric">分</span>
+          </label>
+          <label class="field">
+            <span>起きてから出るまで</span>
+            <span class="unit"><input type="number" id="m-getup" min="0" step="5" inputmode="numeric">分</span>
+          </label>
+          <label class="field">
+            <span>理想の起床</span>
+            <input type="time" id="m-ideal">
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="stations">
+      <h2>駅と移動時間</h2>
+      <div class="morning-box">
+        <div class="fields">
+          <label class="field">
+            <span>撮影場所（自分の家）の駅</span>
+            <input type="text" id="s-base" placeholder="例：〇〇" list="station-list">
+          </label>
+          <label class="field">
+            <span>駅から家まで</span>
+            <span class="unit"><input type="number" id="s-base-walk" min="0" step="1" inputmode="numeric">分</span>
+          </label>
+          <label class="field">
+            <span>相手の名前</span>
+            <input type="text" id="s-partner-name" placeholder="例：相手">
+          </label>
+          <label class="field">
+            <span>相手の家の駅</span>
+            <input type="text" id="s-partner" placeholder="例：〇〇" list="station-list">
+          </label>
+          <label class="field">
+            <span>相手の家から駅まで</span>
+            <span class="unit"><input type="number" id="s-partner-walk" min="0" step="1" inputmode="numeric">分</span>
+          </label>
+          <label class="field">
+            <span>待ち・乗り換えの余裕</span>
+            <span class="unit"><input type="number" id="s-buffer" min="0" step="1" inputmode="numeric">分</span>
+          </label>
+        </div>
+        <p class="sub-h">電車の時間（駅から駅・片道）</p>
+        <div id="pairs" class="pairs"></div>
+      </div>
+      <datalist id="station-list"></datalist>
+    </section>
+
+    <section class="edit">
+      <h2>候補</h2>
+      <div id="cands"></div>
+      <button type="button" class="ghost" id="add">候補を足す</button>
+    </section>
+  </details>
 </main>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
