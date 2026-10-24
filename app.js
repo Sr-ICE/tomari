@@ -1,8 +1,9 @@
-// 今夜の泊まり先 — 1問ずつ聞いて、明日の朝から逆算した「崩れにくい泊まり先」を当てる
-// 保存はこの端末の localStorage だけ。相手には「#s=」付きのリンクで予定と設定を渡す
+// 今夜の泊まり先 — ふたりがそれぞれ自分の質問に答えて、明日の朝から逆算した「崩れにくい泊まり先」を当てる
+// 保存はこの端末の localStorage だけ。答え・予定・設定は「#s=」付きのリンクで送り合う
 
 const KEY = 'tomari.v2';
 const OLD_KEY = 'tomari.v1';
+const FRESH_MS = 16 * 60 * 60 * 1000; // これより古い相手の答えは「今夜の分」とみなさない
 
 // 崩れやすさの初期見込み（記録が増えるほど実績に寄る）
 const RISK = { low: 0.15, mid: 0.4, high: 0.7 };
@@ -12,20 +13,19 @@ const HEALTH = { none: 0, some: 15, high: 30 };
 const HEALTH_LABEL = { none: 'なし', some: '少し', high: 'ある' };
 const BODY = { good: 0.5, ok: 1, throat: 2, bad: 4 };
 const COLD = { cold: 1.5, normal: 1, warm: 0.6 };
-// 相手の移動1分あたりの重み
-const BURDEN = { none: 0, some: 0.15, lot: 0.35 };
-const KIND_LABEL = { base: '自分の家（撮影場所）', partner: '相手の家', other: 'そのほか' };
+const CAFE = { ok: 1, meh: 1.6, ng: 2.5 };
+// 相手の移動1分あたりの重みと、翌朝の予定による倍率
+const MOVE = { fine: 0.05, some: 0.15, lot: 0.35 };
+const PMORNING = { none: 1, am: 1.5, early: 2.5 };
 
 const DEFAULT = {
-  morning: {
-    ready: '09:00', prep: 30, getup: 30, ideal: '06:00',
-    body: 'ok', cold: 'normal', priority: 'time', burden: 'some', meet: '',
-  },
-  places: { base: '', baseWalk: 10, partner: '', partnerName: '相手', partnerWalk: 10, buffer: 10 },
+  role: '', // この端末を使っている人：'self'（撮影する人）／'partner'
+  morning: { ready: '09:00', prep: 30, getup: 30, ideal: '06:00', priority: 'time', meet: '' },
+  places: { selfName: '撮影する人', base: '', baseWalk: 10, partnerName: '相手', partner: '', partnerWalk: 10, buffer: 10 },
   times: {},
-  answers: { wake: 'maybe', promise: 'unsure' },
+  answers: { self: {}, partner: {} },
   candidates: [
-    { id: 'a', name: '自分の家', kind: 'base', station: '', walk: 0, weak: '', risk: 'mid', delay: 60, health: 'none', tips: '', ok: 0, ng: 0 },
+    { id: 'a', name: '撮影する人の家', kind: 'base', station: '', walk: 0, weak: '', risk: 'mid', delay: 60, health: 'none', tips: '', ok: 0, ng: 0 },
     { id: 'b', name: '相手の家', kind: 'partner', station: '', walk: 0, weak: '', risk: 'mid', delay: 90, health: 'none', tips: '', ok: 0, ng: 0 },
     { id: 'c', name: 'ネットカフェ', kind: 'other', station: '', walk: 5, weak: '', risk: 'low', delay: 30, health: 'some', tips: '', ok: 0, ng: 0 },
   ],
@@ -41,11 +41,12 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 let state = load();
 
 function merge(s) {
+  const a = s.answers || {};
   return {
     ...clone(DEFAULT), ...s,
     morning: { ...DEFAULT.morning, ...(s.morning || {}) },
     places: { ...DEFAULT.places, ...(s.places || {}) },
-    answers: { ...DEFAULT.answers, ...(s.answers || {}) },
+    answers: { self: { ...(a.self || {}) }, partner: { ...(a.partner || {}) } },
     times: { ...(s.times || {}) },
   };
 }
@@ -70,6 +71,16 @@ function save() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* 無視 */ }
 }
 
+/* ---------- 名前・役割 ---------- */
+
+const selfName = () => state.places.selfName || '撮影する人';
+const partnerName = () => state.places.partnerName || '相手';
+const nameOf = (role) => (role === 'self' ? selfName() : partnerName());
+const otherRole = (role) => (role === 'self' ? 'partner' : 'self');
+const isFresh = (ans) => !!(ans && ans.at && Date.now() - ans.at < FRESH_MS);
+// 計算に使う答え（古い答えは使わない）
+const ans = (role) => (isFresh(state.answers[role]) || role === state.role ? state.answers[role] : {});
+
 /* ---------- 時刻 ---------- */
 
 const toMin = (t) => { const [h, m] = String(t || '0:0').split(':').map(Number); return (h || 0) * 60 + (m || 0); };
@@ -78,7 +89,6 @@ const fmt = (min) => { const m = ((Math.round(min) % 1440) + 1440) % 1440; retur
 /* ---------- 駅と移動時間 ---------- */
 
 const pairKey = (a, b) => [a, b].sort().join('⇄');
-const partnerName = () => state.places.partnerName || '相手';
 
 // 駅から駅の電車の時間。同じ駅は0、未入力は null
 function train(a, b) {
@@ -101,7 +111,7 @@ function walkOf(c) {
   return num(c.walk);
 }
 
-// 朝：泊まり先 → 撮影場所（自分の家）
+// 朝：泊まり先 → 撮影場所
 function morningTravel(c) {
   if (c.kind === 'base') return { total: 0, train: 0 };
   const p = state.places;
@@ -156,18 +166,29 @@ function knownStations() {
 /* ---------- 計算 ---------- */
 
 function riskAdj(c) {
-  const a = state.answers;
-  if (c.kind === 'base') return { sure: -0.25, unsure: 0, hard: 0.15 }[a.promise] ?? 0;
-  if (c.kind === 'partner') return { sure: -0.25, maybe: 0, no: 0.15 }[a.wake] ?? 0;
+  const s = ans('self');
+  const p = ans('partner');
+  if (c.kind === 'base') {
+    // 撮影する人の家：相手が朝に帰れるかは、相手本人の答えで見る。朝に予定があれば帰りやすい
+    const promise = { sure: -0.25, try: -0.05, hard: 0.15 }[p.promise] ?? 0;
+    const busy = p.morning === 'am' || p.morning === 'early' ? -0.1 : 0;
+    return promise + busy;
+  }
+  if (c.kind === 'partner') return { sure: -0.25, maybe: 0, no: 0.15 }[s.wake] ?? 0;
   return 0;
 }
 
 function compute() {
   const m = state.morning;
+  const s = ans('self');
+  const p = ans('partner');
   const ready = toMin(m.ready);
   const ideal = toMin(m.ideal);
   const prep = num(m.prep);
   const getup = num(m.getup);
+  const body = Math.max(BODY[s.body] ?? 1, BODY[p.body] ?? 1);
+  const cafe = Math.max(CAFE[s.cafe] ?? 1, CAFE[p.cafe] ?? 1);
+  const burdenW = (MOVE[p.move] ?? MOVE.some) * (PMORNING[p.morning] ?? 1);
 
   const rows = state.candidates.map((c) => {
     const mt = morningTravel(c);
@@ -183,11 +204,11 @@ function compute() {
     const prior = clamp((RISK[c.risk] ?? RISK.mid) + riskAdj(c), 0.05, 0.95);
     const pFail = (ng + 2 * prior) / (ok + ng + 2);
     const expDelay = pFail * num(c.delay);
-    const health = (HEALTH[c.health] ?? 0) * (BODY[m.body] ?? 1) * (COLD[m.cold] ?? 1) * (m.priority === 'health' ? 3 : 1);
+    const health = (HEALTH[c.health] ?? 0) * body * (COLD[s.cold] ?? 1) * (c.kind === 'other' ? cafe : 1) * (m.priority === 'health' ? 3 : 1);
     // 相手は「今夜こっちへ来る」と「朝帰る」の2回動く。合流が決まっていれば今夜の分はふたり一緒の移動
     const partnerNight = c.kind === 'partner' ? 0 : (m.meet ? (nt ?? 0) : (pt ?? 0));
     const partnerTotal = c.kind === 'partner' ? (nt ?? 0) : partnerNight + (pt ?? 0);
-    const burden = partnerTotal * (BURDEN[m.burden] ?? 0);
+    const burden = partnerTotal * burdenW;
     const night = (nt ?? 0) * 0.2;
     return { c, mt, pt, nt, missing, travel, leave, wake, earliest, pFail, expDelay, health, burden, night, partnerTotal, needEarly: wake < ideal };
   });
@@ -202,105 +223,84 @@ function compute() {
   return { rows, ready, ideal, prep, getup };
 }
 
-/* ---------- 質問（秋ネーター風） ---------- */
+/* ---------- 質問（秋ネーター風・ふたり別々） ---------- */
 
-const QUESTIONS = [
-  {
-    id: 'ready',
-    ask: () => '明日は何時までに、撮影の準備を終えたい？',
-    options: () => ['08:00', '08:30', '09:00', '09:30', '10:00'].map((v) => ({ v, label: fmt(toMin(v)) })),
-    get: () => state.morning.ready,
-    set: (v) => { state.morning.ready = v; },
-  },
-  {
-    id: 'ideal',
-    ask: () => 'ほんとは何時に起きたい？',
-    note: () => '早く撮れるほどいい、の目安にします',
-    options: () => ['05:30', '06:00', '06:30', '07:00', '07:30'].map((v) => ({ v, label: fmt(toMin(v)) })),
-    get: () => state.morning.ideal,
-    set: (v) => { state.morning.ideal = v; },
-  },
-  {
-    id: 'body',
-    ask: () => 'いまの体調は？',
-    options: () => [
-      { v: 'good', label: '元気' },
-      { v: 'ok', label: '普通' },
-      { v: 'throat', label: '喉や頭が気になる' },
-      { v: 'bad', label: 'よくない' },
-    ],
-    get: () => state.morning.body,
-    set: (v) => { state.morning.body = v; },
-  },
-  {
-    id: 'cold',
-    skip: () => !state.candidates.some((c) => c.health !== 'none'),
-    ask: () => '今夜は冷えそう？',
-    options: () => [
-      { v: 'cold', label: '冷えそう' },
-      { v: 'normal', label: 'ふつう' },
-      { v: 'warm', label: 'あたたかい' },
-    ],
-    get: () => state.morning.cold,
-    set: (v) => { state.morning.cold = v; },
-  },
-  {
-    id: 'wake',
-    skip: () => !state.candidates.some((c) => c.kind === 'partner'),
-    ask: () => `${partnerName()}の家だったら、朝ちゃんとベッドから出られそう？`,
-    options: () => [
-      { v: 'sure', label: '出られる' },
-      { v: 'maybe', label: 'たぶん' },
-      { v: 'no', label: '無理かも' },
-    ],
-    get: () => state.answers.wake,
-    set: (v) => { state.answers.wake = v; },
-  },
-  {
-    id: 'promise',
-    skip: () => !state.candidates.some((c) => c.kind === 'base'),
-    ask: () => {
-      const m = state.morning;
-      const t = fmt(toMin(m.ideal) + num(m.getup));
-      return `自分の家なら、「${t}には帰ってね」を${partnerName()}と約束できる？`;
-    },
-    options: () => [
-      { v: 'sure', label: '約束できて、守ってくれそう' },
-      { v: 'unsure', label: '言えるけど、守られなさそう' },
-      { v: 'hard', label: '言いにくい' },
-    ],
-    get: () => state.answers.promise,
-    set: (v) => { state.answers.promise = v; },
-  },
-  {
-    id: 'meet',
-    ask: () => `今夜、${partnerName()}と合流するのはどの駅のあたり？`,
-    options: () => [...knownStations().map((s) => ({ v: s, label: s })), { v: '', label: 'まだ決めてない' }],
-    get: () => state.morning.meet,
-    set: (v) => { state.morning.meet = v; },
-  },
-  {
-    id: 'burden',
-    ask: () => `${partnerName()}に移動してもらうのは、どのくらい気になる？`,
-    options: () => [
-      { v: 'none', label: '気にしない' },
-      { v: 'some', label: '少し' },
-      { v: 'lot', label: 'けっこう' },
-    ],
-    get: () => state.morning.burden,
-    set: (v) => { state.morning.burden = v; },
-  },
-  {
-    id: 'priority',
-    ask: () => '最後に。いちばん守りたいのは？',
-    options: () => [
-      { v: 'time', label: '朝の時間' },
-      { v: 'health', label: '体調' },
-    ],
-    get: () => state.morning.priority,
-    set: (v) => { state.morning.priority = v; },
-  },
+const hasKind = (k) => state.candidates.some((c) => c.kind === k);
+const hasCafe = () => state.candidates.some((c) => c.kind === 'other' && c.health !== 'none');
+const timeOpts = (list) => list.map((v) => ({ v, label: fmt(toMin(v)) }));
+const BODY_OPTS = [
+  { v: 'good', label: '元気' },
+  { v: 'ok', label: '普通' },
+  { v: 'throat', label: '喉や頭が気になる' },
+  { v: 'bad', label: 'よくない' },
 ];
+const CAFE_OPTS = [
+  { v: 'ok', label: '平気' },
+  { v: 'meh', label: 'ちょっと苦手' },
+  { v: 'ng', label: 'できれば避けたい' },
+];
+// 答えの置き場所：answers[role][key]。撮影の時刻など設定に効くものは morning に書く
+const putAns = (role, key) => ({
+  get: () => state.answers[role][key],
+  set: (v) => { state.answers[role][key] = v; },
+});
+const putMorning = (key) => ({
+  get: () => state.morning[key],
+  set: (v) => { state.morning[key] = v; },
+});
+
+const QUESTIONS = {
+  self: [
+    { id: 'ready', ask: () => '明日は何時までに、撮影の準備を終えたい？', options: () => timeOpts(['08:00', '08:30', '09:00', '09:30', '10:00']), ...putMorning('ready') },
+    { id: 'ideal', ask: () => 'ほんとは何時に起きたい？', note: () => '早く撮れるほどいい、の目安にします', options: () => timeOpts(['05:30', '06:00', '06:30', '07:00', '07:30']), ...putMorning('ideal') },
+    { id: 'body', ask: () => 'いまの体調は？', options: () => BODY_OPTS, ...putAns('self', 'body') },
+    { id: 'cold', skip: () => !hasCafe(), ask: () => '今夜は冷えそう？', options: () => [{ v: 'cold', label: '冷えそう' }, { v: 'normal', label: 'ふつう' }, { v: 'warm', label: 'あたたかい' }], ...putAns('self', 'cold') },
+    { id: 'cafe', skip: () => !hasCafe(), ask: () => '漫画喫茶みたいな所で寝るのは平気？', options: () => CAFE_OPTS, ...putAns('self', 'cafe') },
+    {
+      id: 'wake', skip: () => !hasKind('partner'),
+      ask: () => `${partnerName()}の家だったら、朝ちゃんとベッドから出られそう？`,
+      options: () => [{ v: 'sure', label: '出られる' }, { v: 'maybe', label: 'たぶん' }, { v: 'no', label: '無理かも' }],
+      ...putAns('self', 'wake'),
+    },
+    {
+      id: 'meet', ask: () => `今夜、${partnerName()}と合流するのはどの駅のあたり？`,
+      options: () => [...knownStations().map((v) => ({ v, label: v })), { v: '', label: 'まだ決めてない' }],
+      ...putMorning('meet'),
+    },
+    { id: 'priority', ask: () => '最後に。いちばん守りたいのは？', options: () => [{ v: 'time', label: '朝の時間' }, { v: 'health', label: '体調' }], ...putMorning('priority') },
+  ],
+  partner: [
+    { id: 'body', ask: () => 'いまの体調は？', options: () => BODY_OPTS, ...putAns('partner', 'body') },
+    {
+      id: 'morning', ask: () => '明日の朝、予定はある？',
+      options: () => [{ v: 'none', label: 'ない' }, { v: 'am', label: '午前中にある' }, { v: 'early', label: '朝早くにある' }],
+      ...putAns('partner', 'morning'),
+    },
+    {
+      id: 'promise', skip: () => !hasKind('base'),
+      ask: () => {
+        const m = state.morning;
+        return `${selfName()}の家に泊まるなら、明日の朝${fmt(toMin(m.ideal) + num(m.getup))}に帰れる？`;
+      },
+      note: () => `${selfName()}は、そのあとすぐ撮影の準備に入ります`,
+      options: () => [{ v: 'sure', label: '帰れる' }, { v: 'try', label: 'がんばれば' }, { v: 'hard', label: '正直むずかしい' }],
+      ...putAns('partner', 'promise'),
+    },
+    {
+      id: 'move', ask: () => '移動はどのくらいまでなら平気？',
+      note: () => '今夜と明日の朝の、片道の目安',
+      options: () => [{ v: 'fine', label: '1時間以上でも平気' }, { v: 'some', label: '30分くらいまで' }, { v: 'lot', label: 'なるべく動きたくない' }],
+      ...putAns('partner', 'move'),
+    },
+    { id: 'cafe', skip: () => !hasCafe(), ask: () => '漫画喫茶みたいな所で寝るのは平気？', options: () => CAFE_OPTS, ...putAns('partner', 'cafe') },
+  ],
+};
+
+// quiz.step: -1=はじめ / 0..=質問の番号 / 'done'=答え終わり
+const quiz = { step: -1, preview: false };
+
+const myQuestions = () => (QUESTIONS[state.role] || []).filter((q) => !(q.skip && q.skip()));
+const otherReady = () => state.role && isFresh(state.answers[otherRole(state.role)]);
 
 // 吹き出しの主（月）。考え中は目を閉じ、答えのときは目がひらく
 const moonSvg = (awake) => `
@@ -313,31 +313,71 @@ const moonSvg = (awake) => `
     <circle class="cheek" cx="33" cy="35" r="2.2"/>
   </svg>`;
 
-// quiz.step: -1=はじめ / 0..=質問の番号 / 'result'=答え
-const quiz = { step: -1 };
-
-const activeQuestions = () => QUESTIONS.filter((q) => !(q.skip && q.skip()));
+const bubble = (text, awake, kicker) => `
+  <div class="bubble-wrap">
+    ${moonSvg(awake)}
+    ${kicker ? `<p class="q-no">${esc(kicker)}</p>` : ''}
+    <p class="bubble">${text}</p>
+  </div>`;
 
 function renderQuiz() {
   const box = $('#quiz');
-  $('#all').hidden = quiz.step !== 'result' && quiz.step < activeQuestions().length;
-  if (quiz.step === -1) {
+  renderQuizBody(box);
+  // 答えが出るまでは「ぜんぶの候補」を隠す（中で step が 'done' に変わることがあるので最後に見る）
+  $('#all').hidden = !(quiz.step === 'done' && (otherReady() || quiz.preview));
+}
+
+function renderQuizBody(box) {
+
+  // この端末を誰が使っているか、まだ決まっていない
+  if (!state.role) {
     box.innerHTML = `
-      <div class="bubble-wrap">
-        ${moonSvg(false)}
-        <p class="bubble">今夜どこでねるのがいいか、<br>いくつか聞いて当ててみるね。</p>
-      </div>
-      <div class="actions center">
-        <button type="button" class="primary big" data-act="start">はじめる</button>
+      ${bubble('こんばんは。<br>この画面を使っているのはどっち？', false)}
+      <div class="answers">
+        <button type="button" class="answer" data-role="self">${esc(selfName())}</button>
+        <button type="button" class="answer" data-role="partner">${esc(partnerName())}</button>
       </div>`;
-    box.querySelector('[data-act="start"]').onclick = () => { quiz.step = 0; renderQuiz(); };
+    box.querySelector('.answers').onclick = (e) => {
+      const b = e.target.closest('[data-role]');
+      if (!b) return;
+      state.role = b.dataset.role;
+      save();
+      renderAll();
+    };
     return;
   }
 
-  const qs = activeQuestions();
-  if (quiz.step === 'result' || quiz.step >= qs.length) {
-    quiz.step = 'result';
-    renderAnswer(box);
+  const me = nameOf(state.role);
+  const other = nameOf(otherRole(state.role));
+  const qs = myQuestions();
+
+  if (quiz.step === -1) {
+    const mineDone = isFresh(state.answers[state.role]);
+    const got = otherReady() ? `<br>${esc(other)}の答えは、もう届いてるよ。` : '';
+    // 今夜の分をもう答えていれば、結果か「送る」へすぐ行けるようにする
+    const next = mineDone ? `<button type="button" class="ghost" data-act="resume">${otherReady() ? '結果を見る' : `${esc(other)}に答えを送る`}</button>` : '';
+    box.innerHTML = `
+      ${bubble(`${esc(me)}への質問だよ。<br>答えたら、${esc(other)}に送ってね。${got}`, false)}
+      <div class="actions center">
+        <button type="button" class="primary big" data-act="start">${mineDone ? '答えなおす' : 'はじめる'}</button>
+        ${next}
+      </div>
+      <div class="quiz-foot center"><button type="button" class="link" data-act="swap">${esc(other)}として使う</button></div>`;
+    box.querySelector('.actions').onclick = (e) => {
+      const act = e.target.dataset.act;
+      if (act === 'start') { quiz.step = 0; quiz.preview = false; renderQuiz(); }
+      if (act === 'resume') { if (otherReady()) { quiz.step = 'done'; renderQuiz(); } else sendAnswers(); }
+    };
+    box.querySelector('[data-act="swap"]').onclick = () => { state.role = otherRole(state.role); quiz.step = -1; save(); renderAll(); };
+    return;
+  }
+
+  if (quiz.step === 'done' || quiz.step >= qs.length) {
+    quiz.step = 'done';
+    // 自分の答えに時刻を残す（相手の画面で「今夜の分」かを見分ける）
+    if (!state.answers[state.role].at) { state.answers[state.role].at = Date.now(); save(); }
+    if (otherReady() || quiz.preview) renderAnswer(box);
+    else renderWaiting(box);
     return;
   }
 
@@ -346,32 +386,47 @@ function renderQuiz() {
   const dots = qs.map((_, i) => `<i class="${i < quiz.step ? 'done' : i === quiz.step ? 'now' : ''}"></i>`).join('');
   box.innerHTML = `
     <div class="progress" aria-label="${quiz.step + 1} / ${qs.length}">${dots}</div>
-    <div class="bubble-wrap">
-      ${moonSvg(false)}
-      <p class="q-no">しつもん ${quiz.step + 1}</p>
-      <p class="bubble">${esc(q.ask())}</p>
-      ${q.note ? `<p class="q-note">${esc(q.note())}</p>` : ''}
-    </div>
+    ${bubble(esc(q.ask()), false, `${me}への しつもん ${quiz.step + 1}`)}
+    ${q.note ? `<p class="q-note">${esc(q.note())}</p>` : ''}
     <div class="answers">
       ${q.options().map((o) => `<button type="button" class="answer${o.v === cur ? ' was' : ''}" data-v="${esc(o.v)}">${esc(o.label)}</button>`).join('')}
     </div>
     <div class="quiz-foot">
       <button type="button" class="link" data-act="back">${quiz.step === 0 ? 'はじめに戻る' : 'ひとつ戻る'}</button>
-      <button type="button" class="link" data-act="skip">このまま答えを見る</button>
     </div>`;
   box.querySelector('.answers').onclick = (e) => {
     const b = e.target.closest('.answer');
     if (!b) return;
     q.set(b.dataset.v);
+    state.answers[state.role].at = Date.now();
     save();
     quiz.step += 1;
     renderAll();
   };
   box.querySelector('.quiz-foot').onclick = (e) => {
-    const act = e.target.dataset.act;
-    if (act === 'back') quiz.step = quiz.step === 0 ? -1 : quiz.step - 1;
-    if (act === 'skip') quiz.step = 'result';
+    if (e.target.dataset.act !== 'back') return;
+    quiz.step = quiz.step === 0 ? -1 : quiz.step - 1;
     renderQuiz();
+  };
+}
+
+// 自分は答え終わって、相手の答えがまだ届いていない
+function renderWaiting(box) {
+  const other = nameOf(otherRole(state.role));
+  box.innerHTML = `
+    ${bubble(`ありがとう！<br>${esc(other)}にも答えてもらおう。<br>このリンクを送ってね。`, true, '答え終わり')}
+    <div class="actions center">
+      <button type="button" class="primary big" data-act="send">${esc(other)}に送る</button>
+    </div>
+    <div class="quiz-foot">
+      <button type="button" class="link" data-act="again">答えなおす</button>
+      <button type="button" class="link" data-act="peek">いまの答えだけで見てみる</button>
+    </div>`;
+  box.querySelector('[data-act="send"]').onclick = () => sendAnswers();
+  box.querySelector('.quiz-foot').onclick = (e) => {
+    const act = e.target.dataset.act;
+    if (act === 'again') { quiz.step = 0; renderQuiz(); }
+    if (act === 'peek') { quiz.preview = true; renderQuiz(); }
   };
 }
 
@@ -383,7 +438,7 @@ function reasons(r, second) {
   if (c.kind === 'base') out.push('移動0分。起きたらすぐ撮影の準備に入れる');
   else out.push(`朝は撮影場所まで約${Math.round(r.travel)}分。${fmt(toMin(state.morning.ideal))}に起きれば${fmt(r.earliest)}に準備が終わる`);
   out.push(`崩れる見込みは${Math.round(r.pFail * 100)}%${c.weak ? `（${c.weak}）` : ''}`);
-  if (r.health > 0) out.push(`体調の不安はあるので、対策をしていく`);
+  if (r.health > 0) out.push('体調の不安はあるので、対策をしていく');
   if (c.kind !== 'partner' && r.pt != null) out.push(`${pn}の移動は片道約${Math.round(r.pt)}分`);
   if (second && isFinite(second.loss)) {
     const parts = [
@@ -393,7 +448,7 @@ function reasons(r, second) {
       [`${pn}の移動が長い`, second.burden - r.burden],
       ['今夜の移動が長い', second.night - r.night],
     ].sort((a, b) => b[1] - a[1]);
-    const why = parts.filter((p) => p[1] > 1).slice(0, 2).map((p) => p[0]);
+    const why = parts.filter((x) => x[1] > 1).slice(0, 2).map((x) => x[0]);
     if (why.length) out.push(`次点の「${second.c.name}」は、${why.join('・')}ぶん少し不利`);
   }
   return out;
@@ -402,33 +457,37 @@ function reasons(r, second) {
 function renderAnswer(box) {
   const { rows } = compute();
   const r = rows[0];
+  const other = nameOf(otherRole(state.role));
   if (!r || r.missing) {
     box.innerHTML = `
-      <div class="bubble-wrap">${moonSvg(false)}<p class="bubble">移動時間がまだ入っていない候補があって、当てられなかった…。下の「くわしい設定」で駅と時間を入れてね。</p></div>
+      ${bubble('移動時間がまだ入っていない候補があって、当てられなかった…。<br>下の「くわしい設定」で駅と時間を入れてね。', false)}
       <div class="actions center"><button type="button" class="ghost" data-act="again">質問からやり直す</button></div>`;
     box.querySelector('[data-act="again"]').onclick = () => { quiz.step = 0; renderQuiz(); };
     return;
   }
   const tips = tipsOf(r.c);
+  const provisional = !otherReady();
   box.innerHTML = `
-    <div class="bubble-wrap">
-      ${moonSvg(true)}
-      <p class="q-no">わかった！</p>
-      <p class="bubble">今夜は……</p>
-    </div>
+    ${bubble(provisional ? `${esc(other)}の答えはまだだけど、<br>いまのところ今夜は……` : 'ふたりの答えがそろったよ。<br>今夜は……', true, 'わかった！')}
     <div class="answer-card">
       <span class="icon big-icon" aria-hidden="true">${iconFor(r.c)}</span>
       <p class="answer-name">${esc(r.c.name)}</p>
-      <p class="answer-sub">でしょう！</p>
+      <p class="answer-sub">${provisional ? 'かも？' : 'でしょう！'}</p>
       <ul class="why-list">${reasons(r, rows[1]).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
       ${tips.length ? `<p class="tips-h">持っていく・やっておく</p><ul class="plan-tips">${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
       <div class="actions">
-        <button type="button" class="primary" data-act="pick">これにする</button>
-        <button type="button" class="ghost" data-act="again">質問からやり直す</button>
+        ${provisional
+          ? `<button type="button" class="primary" data-act="send">${esc(other)}に答えを送る</button>`
+          : '<button type="button" class="primary" data-act="pick">これにする</button>'}
+        <button type="button" class="ghost" data-act="again">答えなおす</button>
       </div>
     </div>`;
-  box.querySelector('[data-act="pick"]').onclick = () => decide(r.c.id);
-  box.querySelector('[data-act="again"]').onclick = () => { quiz.step = 0; renderQuiz(); };
+  box.querySelector('.answer-card .actions').onclick = (e) => {
+    const act = e.target.dataset.act;
+    if (act === 'pick') decide(r.c.id);
+    if (act === 'send') sendAnswers();
+    if (act === 'again') { quiz.step = 0; quiz.preview = false; renderQuiz(); }
+  };
 }
 
 /* ---------- 明日の朝（くわしい設定） ---------- */
@@ -453,6 +512,7 @@ function renderMorning() {
 
 function renderPlaces() {
   const p = state.places;
+  $('#s-self-name').value = p.selfName;
   $('#s-base').value = p.base;
   $('#s-base-walk').value = p.baseWalk;
   $('#s-partner-name').value = p.partnerName;
@@ -477,13 +537,13 @@ function renderPairs() {
   $('#station-list').innerHTML = knownStations().map((s) => `<option value="${esc(s)}">`).join('');
 }
 
-[['#s-base', 'base'], ['#s-base-walk', 'baseWalk'], ['#s-partner-name', 'partnerName'], ['#s-partner', 'partner'], ['#s-partner-walk', 'partnerWalk'], ['#s-buffer', 'buffer']].forEach(([sel, key]) => {
+[['#s-self-name', 'selfName'], ['#s-base', 'base'], ['#s-base-walk', 'baseWalk'], ['#s-partner-name', 'partnerName'], ['#s-partner', 'partner'], ['#s-partner-walk', 'partnerWalk'], ['#s-buffer', 'buffer']].forEach(([sel, key]) => {
   $(sel).addEventListener('input', (e) => {
     state.places[key] = e.target.type === 'number' ? Number(e.target.value) : e.target.value.trim();
     save();
     renderPairs();
     renderRanking();
-    if (quiz.step !== -1) renderQuiz();
+    renderQuiz();
   });
 });
 
@@ -532,6 +592,7 @@ function renderRanking() {
     ticks.push(`<span class="tl-tick" style="left:${pct(t)}%;transform:translateX(${shift})">${fmt(t)}</span>`);
   }
   const pn = partnerName();
+  const canPick = otherReady();
 
   const legend = `<li class="legend" aria-hidden="true"><span><i style="background:var(--seg-getup)"></i>身支度</span><span><i style="background:var(--seg-move)"></i>移動</span><span><i style="background:var(--moon)"></i>準備</span><span><i class="dot" style="background:var(--pink)"></i>理想の起床</span></li>`;
 
@@ -544,7 +605,7 @@ function renderRanking() {
             ${r.missing ? '<span class="rank-no">移動時間が未入力</span>' : i === 0 ? '<span class="badge">いちばんおすすめ</span>' : `<span class="rank-no">${i + 1}番目</span>`}
             <span class="name">${esc(c.name) || '（名前なし）'}</span>
           </span>
-          ${r.missing ? '' : `<button type="button" class="pick" data-id="${esc(c.id)}">これにする</button>`}
+          ${r.missing || !canPick ? '' : `<button type="button" class="pick" data-id="${esc(c.id)}">これにする</button>`}
         </div>`;
     if (r.missing) {
       return `<li class="row">${head}<p class="route missing-note">「くわしい設定」の駅と移動時間を入れると並びます</p></li>`;
@@ -589,7 +650,7 @@ $('#ranking').addEventListener('click', (e) => {
   decide(b.dataset.id);
 });
 
-/* ---------- 決める・共有する ---------- */
+/* ---------- 決める ---------- */
 
 function decide(id) {
   const { rows, ready } = compute();
@@ -652,13 +713,11 @@ function renderDecided() {
   box.hidden = false;
   box.innerHTML = `<h2>決めた予定</h2>${planCard(d, '今夜は')}`;
   box.querySelector('[data-slot]').innerHTML = `
-    <button type="button" class="primary" data-act="share">${esc(partnerName())}に送る</button>
-    <button type="button" class="ghost" data-act="copy">リンクをコピー</button>
+    <button type="button" class="primary" data-act="share">${esc(nameOf(otherRole(state.role || 'self')))}に送る</button>
     <button type="button" class="ghost" data-act="cancel">取り消す</button>`;
   box.querySelector('[data-slot]').onclick = (e) => {
     const act = e.target.dataset.act;
-    if (act === 'share') share(d);
-    if (act === 'copy') copy(shareUrl(d), 'リンクをコピーしました');
+    if (act === 'share') share(shareText(d), buildUrl(d), '今夜の泊まり先');
     if (act === 'cancel') { state.decided = null; save(); renderDecided(); }
   };
 }
@@ -670,14 +729,28 @@ function shareText(d) {
   return lines.join('\n');
 }
 
-// 予定と設定を #s= に詰める（# の後ろはサーバーに送られない）
-function shareUrl(d) {
-  const payload = { v: 2, plan: d, morning: state.morning, places: state.places, times: state.times, answers: state.answers, candidates: state.candidates };
+/* ---------- リンクで送り合う ---------- */
+
+// 自分の答え（と、撮影する人なら設定一式・決めた予定）を #s= に詰める。# の後ろはサーバーに送られない
+function buildUrl(plan) {
+  const role = state.role || 'self';
+  const payload = { v: 3, from: role, answers: state.answers[role] };
+  // 相手の答えも持っていれば一緒に渡す（両方の画面で同じ結果になる）
+  const oth = otherRole(role);
+  if (isFresh(state.answers[oth])) payload.other = state.answers[oth];
+  if (role === 'self') Object.assign(payload, { morning: state.morning, places: state.places, times: state.times, candidates: state.candidates });
+  if (plan) payload.plan = plan;
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let bin = '';
   bytes.forEach((b) => { bin += String.fromCharCode(b); });
   const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return `${location.origin}${location.pathname}#s=${b64}`;
+}
+
+function sendAnswers() {
+  const me = nameOf(state.role);
+  const other = nameOf(otherRole(state.role));
+  share(`${me}の答えを送ります。開いて、${other}の質問に答えてね`, buildUrl(null), '今夜どこでねる？');
 }
 
 function readShared() {
@@ -687,18 +760,61 @@ function readShared() {
     const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
     const bin = atob(b64 + '==='.slice((b64.length + 3) % 4));
     const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
-    const data = JSON.parse(new TextDecoder().decode(bytes));
-    return data && (data.v === 1 || data.v === 2) ? data : null;
+    return JSON.parse(new TextDecoder().decode(bytes));
   } catch (e) { return null; }
 }
 
-async function share(d) {
-  const url = shareUrl(d);
-  const text = shareText(d);
-  if (navigator.share) {
-    try { await navigator.share({ title: '今夜の泊まり先', text, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+// 届いたリンクを取り込む。答えは黙って受け取り、設定は撮影する人から届いたときだけ上書きする
+function receiveShared() {
+  const data = readShared();
+  if (!data) return;
+  history.replaceState(null, '', location.pathname);
+  const from = data.from || 'self';
+
+  // setup=true は「設定だけ渡す」最初の1回用。誰が開いても設定を入れ、役割と答えには触らない
+  if (data.setup || data.v === 2 || from === 'self') {
+    for (const k of ['morning', 'places', 'times', 'candidates']) {
+      if (data[k]) state[k] = k === 'candidates' ? data[k] : (k === 'times' ? { ...data[k] } : { ...DEFAULT[k], ...data[k] });
+    }
   }
-  copy(`${text}\n${url}`, '予定とリンクをコピーしました');
+  if (data.v === 3 && !data.setup) {
+    // 初めて開いた端末は、送ってきた人の相手として使う
+    if (!state.role) state.role = otherRole(from);
+    if (from !== state.role) {
+      state.answers[from] = { ...data.answers };
+      if (data.other && from !== state.role) {
+        // 送り主が持っていた「こちらの答え」は、手元のほうが新しければ手元を使う
+        const mine = state.answers[state.role];
+        if (!isFresh(mine) || (data.other.at || 0) > (mine.at || 0)) state.answers[state.role] = { ...data.other };
+      }
+    }
+  }
+  if (data.plan) state.received = data.plan;
+  save();
+
+  const who = nameOf(from);
+  if (data.plan) toast(`${who}から予定が届きました`);
+  else if (data.v === 3 && !data.setup) toast(`${who}の答えを受け取りました`);
+  else toast('設定を受け取りました');
+  // 自分がもう答え終わっていれば、そのまま結果を出す
+  if (state.role && isFresh(state.answers[state.role]) && isFresh(state.answers[otherRole(state.role)])) quiz.step = 'done';
+}
+
+function renderShared() {
+  const box = $('#shared');
+  const p = state.received;
+  if (!p) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = planCard(p, '決まった予定');
+  box.querySelector('[data-slot]').innerHTML = '<button type="button" class="ghost" data-act="close">閉じる</button>';
+  box.querySelector('[data-slot]').onclick = () => { state.received = null; save(); renderShared(); };
+}
+
+async function share(text, url, title) {
+  if (navigator.share) {
+    try { await navigator.share({ title, text, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  copy(`${text}\n${url}`, 'コピーしました。LINEなどに貼ってね');
 }
 
 async function copy(text, msg) {
@@ -713,36 +829,6 @@ async function copy(text, msg) {
     ta.remove();
   }
   toast(msg);
-}
-
-function renderShared() {
-  const data = readShared();
-  const box = $('#shared');
-  if (!data) { box.hidden = true; return; }
-  box.hidden = false;
-  // 予定なしのリンクは「設定だけ渡す」用
-  box.innerHTML = data.plan
-    ? planCard(data.plan, '送られてきた予定')
-    : `<div class="plan-card"><p class="plan-kicker">送られてきた設定</p><p class="plan-name">駅・候補・移動時間</p><div class="actions" data-slot></div></div>`;
-  box.querySelector('[data-slot]').innerHTML = `
-    <button type="button" class="${data.plan ? 'ghost' : 'primary'}" data-act="import">この設定を自分の画面にも入れる</button>
-    <button type="button" class="ghost" data-act="close">閉じる</button>`;
-  box.querySelector('[data-slot]').onclick = (e) => {
-    const act = e.target.dataset.act;
-    if (act === 'import') {
-      if (!confirm('いまの候補・駅・朝の設定を、送られてきた内容で置き換えます。よいですか？')) return;
-      const next = merge({ ...data, decided: state.decided });
-      if (!Array.isArray(data.candidates)) next.candidates = state.candidates;
-      state = next;
-      save();
-      toast('設定を入れました');
-    }
-    if (act === 'close' || act === 'import') {
-      history.replaceState(null, '', location.pathname);
-      box.hidden = true;
-      renderAll();
-    }
-  };
 }
 
 /* ---------- 朝の結果の記録 ---------- */
@@ -782,11 +868,12 @@ function renderRecord() {
 /* ---------- 候補の編集（くわしい設定） ---------- */
 
 function opts(labels, current) {
-  return Object.entries(labels).map(([k, v]) => `<option value="${k}"${k === current ? ' selected' : ''}>${v}</option>`).join('');
+  return Object.entries(labels).map(([k, v]) => `<option value="${k}"${k === current ? ' selected' : ''}>${esc(v)}</option>`).join('');
 }
 
 function renderCands() {
   const p = state.places;
+  const kinds = { base: `${selfName()}の家（撮影場所）`, partner: `${partnerName()}の家`, other: 'そのほか' };
   $('#cands').innerHTML = state.candidates.map((c) => {
     const where = c.kind === 'base'
       ? `<p class="fixed-station wide">駅：${esc(p.base || '（上の「撮影場所の駅」）')}</p>`
@@ -801,7 +888,7 @@ function renderCands() {
         <button type="button" class="cand-del" data-act="del">外す</button>
       </div>
       <div class="cand-grid">
-        <label class="field wide"><span>種類</span><select data-k="kind">${opts(KIND_LABEL, c.kind)}</select></label>
+        <label class="field wide"><span>種類</span><select data-k="kind">${opts(kinds, c.kind)}</select></label>
         ${where}
         <label class="field"><span>崩れやすさ</span><select data-k="risk">${opts(RISK_LABEL, c.risk)}</select></label>
         <label class="field"><span>崩れたら遅れる</span><span class="unit"><input type="number" data-k="delay" value="${esc(c.delay)}" min="0" step="10" inputmode="numeric">分</span></label>
@@ -860,7 +947,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
 function renderAll() {
@@ -874,5 +961,6 @@ function renderAll() {
   renderCands();
 }
 
-window.addEventListener('hashchange', renderAll);
+window.addEventListener('hashchange', () => { receiveShared(); renderAll(); });
+receiveShared();
 renderAll();

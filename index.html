@@ -64,7 +64,11 @@
       <div class="morning-box">
         <div class="fields">
           <label class="field">
-            <span>撮影場所（自分の家）の駅</span>
+            <span>撮影する人の名前</span>
+            <input type="text" id="s-self-name" placeholder="例：撮影する人">
+          </label>
+          <label class="field">
+            <span>撮影場所（その人の家）の駅</span>
             <input type="text" id="s-base" placeholder="例：〇〇" list="station-list">
           </label>
           <label class="field">
@@ -75,6 +79,7 @@
             <span>相手の名前</span>
             <input type="text" id="s-partner-name" placeholder="例：相手">
           </label>
+          <span class="field" aria-hidden="true"></span>
           <label class="field">
             <span>相手の家の駅</span>
             <input type="text" id="s-partner" placeholder="例：〇〇" list="station-list">
