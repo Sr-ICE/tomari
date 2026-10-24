@@ -77,6 +77,18 @@ const selfName = () => state.places.selfName || '撮影する人';
 const partnerName = () => state.places.partnerName || '相手';
 const nameOf = (role) => (role === 'self' ? selfName() : partnerName());
 const otherRole = (role) => (role === 'self' ? 'partner' : 'self');
+// 「崩れるところ」や崩れる見込みを見せてよい画面か（相手の端末では見せない）
+const isSelfView = () => state.role !== 'partner';
+
+// 相手の端末には「崩れるところ」と記録を残さない。前の版のリンクで入ってしまった分もここで消す
+function scrubForPartner() {
+  if (state.role !== 'partner') return;
+  let changed = false;
+  state.candidates.forEach((c) => {
+    if (c.weak || num(c.ok) || num(c.ng)) { c.weak = ''; c.ok = 0; c.ng = 0; changed = true; }
+  });
+  if (changed) save();
+}
 const isFresh = (ans) => !!(ans && ans.at && Date.now() - ans.at < FRESH_MS);
 // 計算に使う答え（古い答えは使わない）
 const ans = (role) => (isFresh(state.answers[role]) || role === state.role ? state.answers[role] : {});
@@ -169,10 +181,10 @@ function riskAdj(c) {
   const s = ans('self');
   const p = ans('partner');
   if (c.kind === 'base') {
-    // 撮影する人の家：相手が朝に帰れるかは、相手本人の答えで見る。朝に予定があれば帰りやすい
-    const promise = { sure: -0.25, try: -0.05, hard: 0.15 }[p.promise] ?? 0;
+    // 撮影する人の家：相手が出る時刻を自分で選んでいれば少し崩れにくい。朝に予定があればなお出やすい
+    const chose = p.leave ? -0.1 : 0;
     const busy = p.morning === 'am' || p.morning === 'early' ? -0.1 : 0;
-    return promise + busy;
+    return chose + busy;
   }
   if (c.kind === 'partner') return { sure: -0.25, maybe: 0, no: 0.15 }[s.wake] ?? 0;
   return 0;
@@ -196,9 +208,15 @@ function compute() {
     const nt = nightTravel(c);
     const missing = mt == null;
     const travel = mt ? mt.total : 0;
-    const leave = ready - prep - travel;          // 出発・解散
+    let leave = ready - prep - travel;            // 出発・解散
     const wake = leave - getup;                    // 遅くともこの時刻に起きる
-    const earliest = ideal + getup + travel + prep; // 理想どおり起きたときの準備完了
+    let earliest = ideal + getup + travel + prep;  // 理想どおり起きたときの準備完了
+    // 撮影する人の家は、相手が出る時刻（相手が選んだもの）が解散。準備はそのあと
+    const partnerLeave = c.kind === 'base' && p.leave ? toMin(p.leave) : null;
+    if (partnerLeave != null) {
+      leave = partnerLeave;
+      earliest = Math.max(ideal + getup, partnerLeave) + prep;
+    }
     const ok = num(c.ok);
     const ng = num(c.ng);
     const prior = clamp((RISK[c.risk] ?? RISK.mid) + riskAdj(c), 0.05, 0.95);
@@ -210,7 +228,7 @@ function compute() {
     const partnerTotal = c.kind === 'partner' ? (nt ?? 0) : partnerNight + (pt ?? 0);
     const burden = partnerTotal * burdenW;
     const night = (nt ?? 0) * 0.2;
-    return { c, mt, pt, nt, missing, travel, leave, wake, earliest, pFail, expDelay, health, burden, night, partnerTotal, needEarly: wake < ideal };
+    return { c, mt, pt, nt, missing, travel, leave, wake, earliest, partnerLeave, pFail, expDelay, health, burden, night, partnerTotal, needEarly: wake < ideal };
   });
 
   const valid = rows.filter((r) => !r.missing);
@@ -228,6 +246,16 @@ function compute() {
 const hasKind = (k) => state.candidates.some((c) => c.kind === k);
 const hasCafe = () => state.candidates.some((c) => c.kind === 'other' && c.health !== 'none');
 const timeOpts = (list) => list.map((v) => ({ v, label: fmt(toMin(v)) }));
+const hhmm = (min) => { const m = ((min % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
+// 相手が出られる時刻の選択肢：起きたい時刻から、準備に間に合う最後の時刻まで30分刻み
+function leaveOptions() {
+  const m = state.morning;
+  const from = Math.floor(toMin(m.ideal) / 30) * 30;
+  const until = toMin(m.ready) - num(m.prep);
+  const list = [];
+  for (let t = from; t <= until && list.length < 7; t += 30) list.push(hhmm(t));
+  return list.length ? list : [hhmm(until)];
+}
 const BODY_OPTS = [
   { v: 'good', label: '元気' },
   { v: 'ok', label: '普通' },
@@ -277,14 +305,11 @@ const QUESTIONS = {
       ...putAns('partner', 'morning'),
     },
     {
-      id: 'promise', skip: () => !hasKind('base'),
-      ask: () => {
-        const m = state.morning;
-        return `${selfName()}の家に泊まるなら、明日の朝${fmt(toMin(m.ideal) + num(m.getup))}に帰れる？`;
-      },
-      note: () => `${selfName()}は、そのあとすぐ撮影の準備に入ります`,
-      options: () => [{ v: 'sure', label: '帰れる' }, { v: 'try', label: 'がんばれば' }, { v: 'hard', label: '正直むずかしい' }],
-      ...putAns('partner', 'promise'),
+      id: 'leave', skip: () => !hasKind('base'),
+      ask: () => `${selfName()}の家に泊まるなら、明日の朝は何時ごろに出られそう？`,
+      note: () => `${selfName()}は、そのあと撮影の準備に入ります`,
+      options: () => [...leaveOptions().map((v) => ({ v, label: `${fmt(toMin(v))}ごろ` })), { v: '', label: 'わからない' }],
+      ...putAns('partner', 'leave'),
     },
     {
       id: 'move', ask: () => '移動はどのくらいまでなら平気？',
@@ -435,9 +460,11 @@ function reasons(r, second) {
   const c = r.c;
   const pn = partnerName();
   const out = [];
-  if (c.kind === 'base') out.push('移動0分。起きたらすぐ撮影の準備に入れる');
+  if (c.kind === 'base' && r.partnerLeave != null) out.push(`移動0分。${pn}が${fmt(r.partnerLeave)}ごろに出たら準備して、${fmt(r.earliest)}に準備が終わる`);
+  else if (c.kind === 'base') out.push('移動0分。起きたらすぐ撮影の準備に入れる');
   else out.push(`朝は撮影場所まで約${Math.round(r.travel)}分。${fmt(toMin(state.morning.ideal))}に起きれば${fmt(r.earliest)}に準備が終わる`);
-  out.push(`崩れる見込みは${Math.round(r.pFail * 100)}%${c.weak ? `（${c.weak}）` : ''}`);
+  // 崩れる見込みと「崩れるところ」は撮影する人だけのメモ。相手の画面には出さない
+  if (isSelfView()) out.push(`崩れる見込みは${Math.round(r.pFail * 100)}%${c.weak ? `（${c.weak}）` : ''}`);
   if (r.health > 0) out.push('体調の不安はあるので、対策をしていく');
   if (c.kind !== 'partner' && r.pt != null) out.push(`${pn}の移動は片道約${Math.round(r.pt)}分`);
   if (second && isFinite(second.loss)) {
@@ -616,16 +643,17 @@ function renderRanking() {
       ? '撮影場所なので移動なし'
       : `撮影場所まで <b>約${Math.round(r.travel)}分</b>${r.mt.train != null ? `（${esc(st)}から電車${r.mt.train}分＋歩き・余裕）` : ''}`;
     const partnerLine = c.kind === 'partner' ? '' : r.pt != null ? `　${esc(pn)}の家まで 片道約${Math.round(r.pt)}分` : '';
+    const self = isSelfView();
     const why = [
-      `崩れる見込み ${Math.round(r.pFail * 100)}%・崩れたら +${num(c.delay)}分`,
+      self ? `崩れる見込み ${Math.round(r.pFail * 100)}%・崩れたら +${num(c.delay)}分` : '',
       r.health ? `体調の不安 +${Math.round(r.health)}` : '',
-      (num(c.ok) + num(c.ng)) ? `記録 守れた${c.ok}・守れなかった${c.ng}` : '',
+      self && (num(c.ok) + num(c.ng)) ? `記録 守れた${c.ok}・守れなかった${c.ng}` : '',
     ].filter(Boolean).join('　');
     return `
       <li class="row${i === 0 ? ' top' : ''}">
         ${head}
         <div class="times">
-          <div class="${r.needEarly ? 'warn' : ''}"><em>遅くとも起床</em><b>${fmt(r.wake)}</b></div>
+          <div class="${r.needEarly && self ? 'warn' : ''}"><em>遅くとも起床</em><b>${fmt(r.wake)}</b></div>
           <div><em>${r.travel ? '出発・解散' : '解散'}</em><b>${fmt(r.leave)}</b></div>
           <div><em>最速の準備完了</em><b>${fmt(r.earliest)}</b></div>
         </div>
@@ -638,7 +666,7 @@ function renderRanking() {
           ${ticks.join('')}
         </div>
         <p class="route">${route}${partnerLine}</p>
-        ${c.weak ? `<p class="weak">崩れるところ：${esc(c.weak)}</p>` : ''}
+        ${c.weak && self ? `<p class="weak">崩れるところ：${esc(c.weak)}</p>` : ''}
         <p class="why">${why}${r.needEarly ? '　<span class="warn">理想より早起きが必要</span>' : ''}</p>
       </li>`;
   }).join('');
@@ -667,7 +695,7 @@ function decide(id) {
   const ideal = toMin(m.ideal);
   const useIdeal = ideal <= r.wake;
   const wake = useIdeal ? ideal : r.wake;
-  const leave = useIdeal ? ideal + num(m.getup) : r.leave;
+  const leave = r.partnerLeave ?? (useIdeal ? ideal + num(m.getup) : r.leave);
   const doneAt = useIdeal ? r.earliest : ready;
 
   state.decided = {
@@ -738,7 +766,11 @@ function buildUrl(plan) {
   // 相手の答えも持っていれば一緒に渡す（両方の画面で同じ結果になる）
   const oth = otherRole(role);
   if (isFresh(state.answers[oth])) payload.other = state.answers[oth];
-  if (role === 'self') Object.assign(payload, { morning: state.morning, places: state.places, times: state.times, candidates: state.candidates });
+  // 「崩れるところ」と記録は撮影する人だけのもの。リンクには入れない
+  if (role === 'self') {
+    const candidates = state.candidates.map(({ weak, ok, ng, ...c }) => ({ ...c, weak: '', ok: 0, ng: 0 }));
+    Object.assign(payload, { morning: state.morning, places: state.places, times: state.times, candidates });
+  }
   if (plan) payload.plan = plan;
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
   let bin = '';
@@ -893,7 +925,7 @@ function renderCands() {
         <label class="field"><span>崩れやすさ</span><select data-k="risk">${opts(RISK_LABEL, c.risk)}</select></label>
         <label class="field"><span>崩れたら遅れる</span><span class="unit"><input type="number" data-k="delay" value="${esc(c.delay)}" min="0" step="10" inputmode="numeric">分</span></label>
         <label class="field"><span>体調の不安</span><select data-k="health">${opts(HEALTH_LABEL, c.health)}</select></label>
-        <label class="field wide"><span>崩れるところ</span><input type="text" data-k="weak" value="${esc(c.weak)}" placeholder="例：朝ベッドから起き上がれない"></label>
+        <label class="field wide"><span>崩れるところ（自分だけのメモ・相手には送らない）</span><input type="text" data-k="weak" value="${esc(c.weak)}" placeholder="例：朝ベッドから起き上がれない"></label>
         <label class="field wide"><span>対策（1行に1つ）</span><textarea data-k="tips" placeholder="例：前の晩に解散の時刻を決めておく">${esc(c.tips)}</textarea></label>
         <div class="field wide"><span>これまでの記録</span>
           <span class="counts">
@@ -951,6 +983,10 @@ function toast(msg) {
 }
 
 function renderAll() {
+  scrubForPartner();
+  // 相手の端末では設定を出さない（設定は撮影する人から届くリンクで入る）
+  $('.more').hidden = state.role === 'partner';
+  if (state.role === 'partner') $('#all-note').textContent = '並び順は、朝の準備が終わる早さ・体調・移動の長さを合わせて見た順です。';
   renderShared();
   renderRecord();
   renderQuiz();

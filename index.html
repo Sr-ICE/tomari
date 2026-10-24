@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#1c1e3d">
 <title>今夜の泊まり先</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 <main>
@@ -29,7 +29,7 @@
   <section class="result" id="all" hidden>
     <h2>ぜんぶの候補</h2>
     <ol id="ranking" class="ranking"></ol>
-    <p class="note">並び順は「最速の準備完了の遅さ」「崩れたときの遅れ × 崩れる見込み」「体調の不安」「今夜の移動」「相手の移動」を分に直して足した小さい順です。最速の準備完了は、理想の起床どおりに起きたときの時刻です。崩れる見込みは、朝の記録が増えるほど実績に寄っていきます。</p>
+    <p class="note" id="all-note">並び順は「最速の準備完了の遅さ」「崩れたときの遅れ × 崩れる見込み」「体調の不安」「今夜の移動」「相手の移動」を分に直して足した小さい順です。最速の準備完了は、理想の起床どおりに起きたときの時刻です。崩れる見込みは、朝の記録が増えるほど実績に寄っていきます。</p>
   </section>
 
   <details class="more">
@@ -108,6 +108,7 @@
 </main>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
-<script src="app.js"></script>
+<!-- ?v= は直すたびに上げる（スマホに古い app.js が残らないように） -->
+<script src="app.js?v=4"></script>
 </body>
 </html>
